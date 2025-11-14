@@ -1,0 +1,1448 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hệ Thống Quản Lý Kho Kệ</title>
+ 
+    <link href="./dist/output.css" rel="stylesheet">
+    <!-- Thư viện SheetJS cho phép xuất file Excel -->
+    <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .card { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06); border-radius: 12px; }
+        /* Cuộn ngang cho khu vực kho */
+        .shelf-container {
+            overflow-x: auto;
+            white-space: nowrap;
+            padding-bottom: 1rem;
+        }
+        .shelf-location {
+            display: inline-block;
+            width: 250px; /* Chiều rộng cố định cho mỗi thẻ kho */
+            height: 250px; /* Chiều cao cố định cho mỗi thẻ kho */
+            vertical-align: top;
+        }
+        .row-shelf {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background-color: #f9fafb;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+
+    <!-- Script tải Firebase Modules và Logic Ứng dụng -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, collection, query, onSnapshot, setDoc, serverTimestamp, getDoc, updateDoc, arrayUnion, arrayRemove } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        const firebaseConfig = {
+  apiKey: "AIzaSyAqPp5Ym-dapX30KzuzMp8oH1EWJO3dqfE",
+  authDomain: "khonguyenlieubpc01.firebaseapp.com",
+  projectId: "khonguyenlieubpc01",
+  storageBucket: "khonguyenlieubpc01.firebasestorage.app",
+  messagingSenderId: "840063614100",
+  appId: "1:840063614100:web:60da34b6462042a1500881",
+  measurementId: "G-ZN0RECEVQN"
+};
+
+// Initialize Firebase
+//const app = initializeApp(firebaseConfig);
+//const analytics = getAnalytics(app);
+        // Biến toàn cục từ môi trường Canvas
+        //const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        //const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        //const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+const initialAuthToken = null;
+        let db, auth, firestoreUserId = null;
+        let loggedInUser = null;
+        let appState = 'login'; // 'login', 'dashboard', 'manage_inventory', 'reports', 'check_location'
+        let inventoryData = {}; // Cache dữ liệu kho
+        let currentModalHistory = []; // Lịch sử của thẻ kho đang mở
+
+        // Cấu hình 3 tài khoản cố định (In-memory authentication)
+        const USER_ACCOUNTS = {
+            'anhle': { password: 'pass1', fullName: 'Le Ngoc Anh' },
+            'minhhung': { password: 'pass2', fullName: 'Đinh Minh Hưng' },
+            'thanhtai': { password: 'pass3', fullName: 'Phan Thành Tài' }
+        };
+
+        // Cấu trúc kho: 6 Dãy (A-F), 4 Hàng (1-4), 24 Cột (01-24)
+        const AISLES = ['A', 'B', 'C', 'D', 'E', 'F'];
+        const ROWS = ['1', '2', '3', '4'];
+        const COLS = Array.from({ length: 24 }, (_, i) => (i + 1).toString().padStart(2, '0'));
+        const TOTAL_LOCATIONS = AISLES.length * ROWS.length * COLS.length;
+        
+        // --- KHỞI TẠO FIREBASE & XÁC THỰC ---
+
+const app = initializeApp(firebaseConfig);// Ví dụ về vị trí khai báo (Khoảng Dòng 83-85)
+ db = getFirestore(app);
+ auth = getAuth(app);
+const appID = "khonguyenlieubpc01"; // Đảm bảo DÒNG NÀY ĐÃ ĐƯỢC LƯU
+let firestoreUserid = null; // Biến này cũng phải được khai báo
+
+        setLogLevel('debug'); // Bật log debug cho Firestore
+
+        // Xử lý xác thực ban đầu (Sign in anonymously for security rules)
+        onAuthStateChanged(auth, async (user) => {
+            if (!user) {
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Lỗi xác thực Firebase:", error);
+                }
+            }
+            firestoreUserId = auth.currentUser?.uid;
+            renderApp(); // Hiển thị giao diện lần đầu (mặc định là login)
+            if (firestoreUserId) {
+                setupRealtimeListener();
+            }
+        });
+
+        // Hàm lấy đường dẫn Collection cho dữ liệu Kho (Public)
+       const getInventoryCollectionRef = (db, appID) => { 
+    // DÒNG 113: Sẽ hoạt động vì db và appID đã được truyền vào
+    return collection(db, 
+    'artifacts',       // 1. Collection
+    'config_doc',      // 2. Document
+    'data',            // 3. Collection
+    'inventory_cards', // 4. Document
+    'items'            // 5. Collection ID (HOẶC bất kỳ tên Collection nào bạn muốn)
+);
+};
+
+        // Lắng nghe dữ liệu tồn kho theo thời gian thực
+        const setupRealtimeListener = () => {
+            if (!firestoreUserId) return;
+
+            const q = query(getInventoryCollectionRef(db , appID));
+
+            onSnapshot(q, (snapshot) => {
+                const data = {};
+                snapshot.forEach((doc) => {
+                    data[doc.id] = doc.data();
+                });
+                inventoryData = data;
+                if (appState === 'manage_inventory') {
+                    renderManageInventory(); // Cập nhật lại giao diện quản lý kho nếu đang ở đó
+                }
+                if (appState === 'check_location') {
+                    renderApp(); // Cập nhật lại tổng quan kho
+                }
+            }, (error) => {
+                console.error("Lỗi khi lắng nghe dữ liệu tồn kho:", error);
+            });
+        };
+
+        // --- LOGIC XÁC THỰC IN-MEMORY ---
+
+        window.handleLogin = (event) => {
+            event.preventDefault();
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
+            const statusEl = document.getElementById('login-status');
+
+            if (USER_ACCOUNTS[username] && USER_ACCOUNTS[username].password === password) {
+                loggedInUser = USER_ACCOUNTS[username].fullName; // Lưu tên đầy đủ
+                appState = 'dashboard';
+                renderApp();
+            } else {
+                statusEl.innerText = 'Tài khoản hoặc mật khẩu không đúng.';
+                statusEl.classList.remove('hidden');
+            }
+        };
+
+        window.handleLogout = () => {
+            loggedInUser = null;
+            appState = 'login';
+            renderApp();
+        };
+
+        // --- LOGIC CHUYỂN TRANG/STATE ---
+
+        window.navigateTo = (state) => {
+            if (loggedInUser || state === 'login') {
+                appState = state;
+                renderApp();
+            }
+        };
+
+        // --- HÀM RENDER CHÍNH ---
+
+        const appContainer = document.getElementById('app-container');
+
+        const renderApp = () => {
+            if (!appContainer) return;
+
+            let htmlContent = '';
+            
+            if (appState === 'login') {
+                htmlContent = renderLogin();
+            } else {
+                htmlContent = renderMainLayout();
+            }
+
+            appContainer.innerHTML = htmlContent;
+            
+            // Render nội dung chính sau khi layout được chèn
+            if (appState !== 'login') {
+                renderContent();
+            }
+            
+            // Cài đặt lại sự kiện cho form Đăng nhập nếu đang ở trạng thái Login
+            if (appState === 'login') {
+                document.getElementById('login-form')?.addEventListener('submit', window.handleLogin);
+            }
+        };
+
+        const renderLogin = () => `
+            <div class="flex items-center justify-center min-h-screen bg-gray-50">
+                <div class="w-full max-w-md p-8 space-y-6 bg-white card">
+                    <h2 class="text-3xl font-bold text-center text-blue-700">ĐĂNG NHẬP HỆ THỐNG KHO</h2>
+                    <p class="text-center text-sm text-gray-500">Sử dụng 1 trong 3 tài khoản mẫu</p>
+                    <ul class="text-xs text-gray-500 list-disc list-inside p-2 bg-gray-50 rounded-lg">
+                        <li>anhle (Quản Lý KNL)</li>
+                        <li>minhhung  (Thủ Kho Swine)</li>
+                        <li>thanhtai (Thủ Kho )</li>
+                    </ul>
+                    <form id="login-form" class="space-y-4">
+                        <div>
+                            <label for="login-username" class="sr-only">Tên đăng nhập</label>
+                            <input id="login-username" name="username" type="text" value="user1" required class="relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-lg focus:outline-none focus:ring-blue-500 focus:border-blue-500" placeholder="Tên đăng nhập">
+                        </div>
+                        <div>
+                            <label for="login-password" class="sr-only">Mật khẩu</label>
+                            <input id="login-password" name="password" type="password" value="pass1" required class="relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-lg focus:outline-none focus:ring-blue-500 focus:border-blue-500" placeholder="Mật khẩu">
+                        </div>
+                        <div id="login-status" class="hidden text-sm text-red-500 text-center"></div>
+                        <div>
+                            <button type="submit" class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                                Đăng Nhập
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        `;
+
+        const renderMainLayout = () => {
+            const getNavItemClass = (state) => appState === state ? 'bg-blue-700 text-white' : 'text-blue-100 hover:bg-blue-600';
+            
+            return `
+                <div class="flex h-screen overflow-hidden">
+                    <!-- Sidebar -->
+                    <div class="flex flex-col w-64 bg-blue-800 text-white">
+                        <div class="p-6 text-2xl font-bold border-b border-blue-700">
+                            Kho Nguyên Liệu
+                        </div>
+                        <nav class="flex-grow p-4 space-y-2">
+                            <h3 class="text-xs font-semibold uppercase text-blue-300 mb-2">Xin chào: ${loggedInUser}</h3>
+                            <button onclick="navigateTo('dashboard')" class="w-full text-left py-2 px-4 rounded-lg transition-colors duration-200 ${getNavItemClass('dashboard')}">
+                                Bảng Điều Khiển
+                            </button>
+                            <button onclick="navigateTo('manage_inventory')" class="w-full text-left py-2 px-4 rounded-lg transition-colors duration-200 ${getNavItemClass('manage_inventory')}">
+                                Quản Lý Kho Kệ
+                            </button>
+                            <button onclick="navigateTo('reports')" class="w-full text-left py-2 px-4 rounded-lg transition-colors duration-200 ${getNavItemClass('reports')}">
+                                Báo Cáo Tồn/Nhập
+                            </button>
+                            <button onclick="navigateTo('check_location')" class="w-full text-left py-2 px-4 rounded-lg transition-colors duration-200 ${getNavItemClass('check_location')}">
+                                Kiểm Tra Kho Kệ
+                            </button>
+                        </nav>
+                        <div class="p-4 border-t border-blue-700">
+                            <button onclick="handleLogout()" class="w-full py-2 px-4 border border-blue-600 text-sm font-medium rounded-lg text-white bg-red-600 hover:bg-red-700 transition duration-150">
+                                Đăng Xuất
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Main Content -->
+                    <div class="flex-1 overflow-y-auto p-6">
+                        <h1 id="page-title" class="text-3xl font-semibold text-gray-800 mb-6"></h1>
+                        <div id="content-area">
+                            <!-- Nội dung chi tiết sẽ được chèn vào đây -->
+                            <div id="loading-indicator" class="flex justify-center items-center py-20 text-gray-500">
+                                <svg class="animate-spin h-5 w-5 mr-3" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">...</svg> Đang tải...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+
+        const renderContent = () => {
+            const contentArea = document.getElementById('content-area');
+            const pageTitle = document.getElementById('page-title');
+            if (!contentArea || !pageTitle) return;
+            
+            contentArea.innerHTML = '<div id="loading-indicator" class="flex justify-center items-center py-20 text-gray-500"><svg class="animate-spin h-5 w-5 mr-3" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Đang tải...</div>';
+
+            switch (appState) {
+                case 'dashboard':
+                    pageTitle.innerText = 'Bảng Điều Khiển Chính';
+                    contentArea.innerHTML = renderDashboard();
+                    break;
+                case 'manage_inventory':
+                    pageTitle.innerText = 'Quản Lý Kho Kệ - Thẻ Kho';
+                    renderManageInventory(contentArea);
+                    break;
+                case 'reports':
+                    pageTitle.innerText = 'Báo Cáo Tồn và Nhập Xuất';
+                    contentArea.innerHTML = renderReports();
+                    break;
+                case 'check_location':
+                    pageTitle.innerText = 'Kiểm Tra Tồn Kho Kệ';
+                    contentArea.innerHTML = renderCheckLocation();
+                    break;
+                default:
+                    pageTitle.innerText = 'Lỗi 404';
+                    contentArea.innerHTML = '<p class="text-red-500">Trang không tồn tại.</p>';
+            }
+        };
+
+        // Hàm tạo ID vị trí mới: Hàng-Dãy-Cột (ví dụ: 1A01, 2B15)
+        const getLocationId = (row, aisle, col) => {
+            return `${row}${aisle}${col}`;
+        }
+        
+        // Helper to generate all location IDs
+        const getAllLocationIds = () => {
+            const allIds = [];
+            AISLES.forEach(aisle => {
+                ROWS.forEach(row => {
+                    COLS.forEach(col => {
+                        allIds.push(getLocationId(row, aisle, col));
+                    });
+                });
+            });
+            return allIds;
+        };
+
+        // --- HÀM TÍNH TOÁN VÀ PHÂN LOẠI FIFO/COLOR ---
+        
+        const getLocationCardClasses = (loc) => {
+            if (!loc.isOccupied) {
+                return { cardClass: 'border-gray-300 bg-gray-50 hover:bg-gray-100', materialClass: 'text-gray-500', ageText: '' };
+            }
+            
+            const age = loc.ageInDays;
+            let cardClass, materialClass;
+            let ageText = loc.data.fifoDate ? `(FIFO: ${loc.ageInDays} ngày)` : '';
+            
+            if (age === null) {
+                // Có vật liệu nhưng không có fifoDate (dữ liệu cũ/lỗi)
+                cardClass = 'border-yellow-500 bg-yellow-50 hover:shadow-lg';
+                materialClass = 'text-yellow-700';
+                ageText = '(Chưa có ngày FIFO)';
+            } else if (age >= 60) {
+                // >= 60 ngày: Cần xuất gấp (Red)
+                cardClass = 'border-red-500 bg-red-100 hover:shadow-xl';
+                materialClass = 'text-red-700';
+            } else if (age >= 30) {
+                // 30 - 59 ngày: Sắp đến hạn (Orange)
+                cardClass = 'border-orange-400 bg-orange-100 hover:shadow-lg';
+                materialClass = 'text-orange-700';
+            } else {
+                // < 30 ngày: Hàng mới (Green)
+                cardClass = 'border-green-400 bg-green-50 hover:shadow-md';
+                materialClass = 'text-green-700';
+            }
+            
+            return { cardClass, materialClass, ageText };
+        };
+
+        const renderLocationCard = (loc) => {
+            const { cardClass, materialClass, ageText } = getLocationCardClasses(loc);
+            
+            const data = loc.data;
+            const materialName = data.materialName || 'Vị trí trống';
+            const currentQuantity = data.currentQuantity || 0;
+            
+            // Hiển thị ngày FIFO nếu có
+            const fifoInfo = loc.isOccupied && loc.ageInDays !== null ? 
+                `<p class="text-xs ${loc.ageInDays >= 60 ? 'text-red-500 font-bold' : 'text-gray-500'}">FIFO: ${new Date(data.fifoDate).toLocaleDateString('vi-VN')} (${loc.ageInDays} ngày)</p>` : 
+                '';
+
+            return `
+                <div onclick="window.showLocationModal('${loc.id}')" 
+                    class="shelf-location flex-shrink-0 border-2 rounded-lg p-3 cursor-pointer transition-all ${cardClass}">
+                    <p class="text-sm font-bold text-gray-800 mb-2 truncate">${loc.id}</p>
+                    <p class="text-base font-semibold truncate ${materialClass}">${materialName}</p>
+                    ${loc.isOccupied ? `
+                        <p class="text-sm text-gray-600 mt-1">Tồn: <span class="font-bold text-lg text-blue-600">${currentQuantity.toLocaleString('vi-VN')}</span> ${data.unit}</p>
+                        ${fifoInfo}
+                        <p class="text-xs text-gray-500">Lot: ${data.lotNo} - NCC: ${data.supplier}</p>
+                        <button class="mt-2 w-full py-1 bg-blue-500 text-white text-xs rounded-lg hover:bg-blue-600">Chi tiết & Thao tác</button>
+                    ` : `
+                        <p class="text-sm text-gray-500 italic mt-2">Chưa có nguyên liệu</p>
+                    `}
+                </div>
+            `;
+        }
+
+        // Helper for filtering and sorting (NEW)
+        const getFilteredAndSortedLocations = (currentAisle, searchTerm) => {
+            const now = Date.now();
+            const isAllView = currentAisle === 'ALL';
+            
+            // 1. Get relevant locations based on Aisle selection
+            let locationIds;
+            if (isAllView) {
+                locationIds = getAllLocationIds();
+            } else {
+                locationIds = ROWS.flatMap(row => COLS.map(col => getLocationId(row, currentAisle, col)));
+            }
+            
+            // 2. Filter and enhance data for sorting/display
+            const enrichedLocations = locationIds.map(locationId => {
+                const data = inventoryData[locationId] || { materialName: null, currentQuantity: 0, fifoDate: null };
+                
+                let ageInDays = null;
+                if (data.fifoDate) {
+                    const fifoTime = new Date(data.fifoDate).getTime();
+                    ageInDays = Math.floor((now - fifoTime) / (1000 * 60 * 60 * 24));
+                }
+                
+                return {
+                    id: locationId,
+                    data,
+                    isOccupied: !!data.materialName && data.currentQuantity > 0,
+                    ageInDays
+                };
+            });
+            
+            // 3. Filtering by materialName
+            let filteredLocations = enrichedLocations;
+            if (searchTerm) {
+                const lowerCaseSearch = searchTerm.toLowerCase().trim();
+                // If searching, only show occupied locations that match the search term.
+                filteredLocations = enrichedLocations.filter(loc => 
+                    loc.isOccupied && loc.data.materialName && loc.data.materialName.toLowerCase().includes(lowerCaseSearch)
+                );
+            } else if (!isAllView) {
+                 // In Aisle view (A-F), we show everything in that Aisle
+                 filteredLocations = enrichedLocations;
+            } else if (isAllView && !searchTerm) {
+                 // In ALL view without search, show all locations
+                 filteredLocations = enrichedLocations;
+            }
+
+
+            // 4. Sorting (FIFO for occupied/searched items, then by location ID)
+            filteredLocations.sort((a, b) => {
+                // Sorting for ALL/Search view: Occupied (FIFO) -> Empty (Location ID)
+                if (isAllView || searchTerm) {
+                    if (a.isOccupied && !b.isOccupied) return -1; // Occupied first
+                    if (!a.isOccupied && b.isOccupied) return 1;  // Empty last
+
+                    if (a.isOccupied && b.isOccupied) {
+                        // Both occupied: Oldest first (FIFO)
+                        const dateA = new Date(a.data.fifoDate || new Date()).getTime();
+                        const dateB = new Date(b.data.fifoDate || new Date()).getTime();
+                        return dateA - dateB;
+                    }
+                    
+                    // Both empty or for default Aisle view: Sort by location ID
+                    return a.id.localeCompare(b.id);
+                }
+                
+                // Default sort for Aisle view (A-F), maintaining the grid order
+                return a.id.localeCompare(b.id);
+            });
+            
+            return filteredLocations;
+        };
+        
+        // Render view for a single Aisle (A-F)
+        const renderAisleView = (currentAisle, filteredLocations) => {
+            let html = `<h3 class="text-xl font-semibold text-gray-700 mb-4">Dãy Kho ${currentAisle} - Chi tiết 4 Hàng</h3>`;
+            
+            ROWS.forEach(row => {
+                html += `
+                    <div class="row-shelf">
+                        <h4 class="text-lg font-bold text-gray-800 mb-4">Hàng ${row} (Vị trí ${row}${currentAisle}01 - ${row}${currentAisle}24)</h4>
+                        <div class="shelf-container">
+                            <div class="flex space-x-4 pb-2">`;
+                
+                // Filter locations belonging to this specific Row and Aisle
+                const rowLocations = filteredLocations.filter(loc => loc.id.startsWith(`${row}${currentAisle}`));
+                
+                rowLocations.forEach(loc => {
+                    html += renderLocationCard(loc);
+                });
+                
+                html += `</div></div></div>`;
+            });
+            return html;
+        };
+
+        // Render view for ALL locations (used for ALL tab and Search results) (NEW)
+        const renderAllInventoryView = (currentAisle, searchTerm, filteredLocations) => {
+            let title = searchTerm ? `Kết quả tìm kiếm cho: "${searchTerm}" (${filteredLocations.length} vị trí)` : 
+                                    `Tất Cả Vị Trí Kho (576 vị trí) - Sắp xếp theo FIFO (hàng cũ nhất lên trước)`;
+
+            let html = `<h3 class="text-xl font-semibold text-gray-700 mb-4">${title}</h3>`;
+            
+            // Nếu có searchTerm, chỉ hiển thị các vị trí có hàng được lọc. Ngược lại, hiển thị tất cả.
+            const displayLocations = searchTerm 
+                ? filteredLocations 
+                : filteredLocations.filter(loc => loc.isOccupied).concat(filteredLocations.filter(loc => !loc.isOccupied));
+            
+            if (displayLocations.length === 0 && searchTerm) {
+                html += `<div class="p-6 bg-yellow-50 text-center text-gray-600 rounded-lg">Không tìm thấy nguyên liệu nào phù hợp với điều kiện tìm kiếm.</div>`;
+            } else if (displayLocations.length === 0 && !searchTerm) {
+                 html += `<div class="p-6 bg-green-50 text-center text-gray-600 rounded-lg">Toàn bộ kho kệ hiện đang trống.</div>`;
+            } else {
+                html += `<div class="p-4 bg-white card">
+                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">`;
+                
+                displayLocations.forEach(loc => {
+                    html += renderLocationCard(loc);
+                });
+
+                html += `</div></div>`;
+            }
+            
+            return html;
+        };
+
+        // --- RENDER DASHBOARD ---
+        const renderDashboard = () => `
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                ${renderStatCard('Quản Lý Kho', 'manage_inventory', 'bg-blue-600', 'Quản lý 576 vị trí tồn kho')}
+                ${renderStatCard('Báo Cáo Tồn', 'reports', 'bg-green-600', 'Xem tồn kho theo Lot/Tổng')}
+                ${renderStatCard('Báo Cáo Nhập', 'reports', 'bg-yellow-600', 'Lịch sử nhập hàng')}
+                ${renderStatCard('Kiểm Tra Kho', 'check_location', 'bg-purple-600', 'Xem nhanh trạng thái kho kệ')}
+            </div>
+            <div class="mt-8 p-6 bg-white card">
+                <h3 class="text-xl font-semibold mb-4">Thông tin hệ thống</h3>
+                <p>Tổng số vị trí kho: ${TOTAL_LOCATIONS}</p>
+                <p>Người dùng hiện tại: ${loggedInUser}</p>
+                <p class="text-xs text-gray-500 mt-2">ID Firebase tạm thời: ${firestoreUserId}</p>
+            </div>
+        `;
+
+        const renderStatCard = (title, state, bgColor, description) => `
+            <div onclick="navigateTo('${state}')" class="p-6 ${bgColor} text-white card cursor-pointer hover:bg-opacity-90 transition duration-150">
+                <h3 class="text-2xl font-bold mb-2">${title}</h3>
+                <p class="text-sm">${description}</p>
+            </div>
+        `;
+
+        // --- RENDER QUẢN LÝ KHO KỆ (VỊ TRÍ) ---
+        
+        window.selectAisle = (aisle) => {
+            const contentArea = document.getElementById('content-area');
+            if (!contentArea) return;
+            contentArea.dataset.currentAisle = aisle;
+            contentArea.dataset.searchTerm = ''; // Xóa search khi chuyển Aisle
+            renderManageInventory(contentArea);
+        };
+
+        window.handleSearch = (term) => {
+            const contentArea = document.getElementById('content-area');
+            if (!contentArea) return;
+            contentArea.dataset.searchTerm = term;
+            
+            // Tự động chuyển sang chế độ ALL nếu tìm kiếm có giá trị
+            if (term && contentArea.dataset.currentAisle !== 'ALL') {
+                contentArea.dataset.currentAisle = 'ALL';
+            } else if (!term && contentArea.dataset.currentAisle === 'ALL') {
+                // Nếu xóa term, quay về Aisle A nếu đang ở ALL
+                contentArea.dataset.currentAisle = AISLES[0];
+            }
+            renderManageInventory(contentArea);
+        };
+
+
+        // Hiển thị 4 hàng của dãy được chọn
+        const renderManageInventory = (contentArea) => {
+            if (!contentArea) contentArea = document.getElementById('content-area');
+            if (!contentArea) return;
+
+            // Lấy Dãy hiện tại, mặc định là A. Thêm 'ALL'
+            const currentAisle = contentArea.dataset.currentAisle || AISLES[0];
+            const searchTerm = contentArea.dataset.searchTerm || '';
+
+            // Xây dựng giao diện chọn Dãy (A-F + ALL)
+            let html = `<div class="p-4 bg-white card mb-6">
+                <div class="flex flex-col md:flex-row md:items-center justify-between mb-4 space-y-3 md:space-y-0">
+                    <h3 class="text-lg font-semibold">Chọn Dãy Kho hoặc Tổng quan (FIFO Search)</h3>
+                    <input type="text" id="search-input" value="${searchTerm}" oninput="window.handleSearch(this.value)" 
+                        placeholder="🔍 Tìm kiếm Tên Nguyên Liệu..." 
+                        class="w-full md:w-1/3 p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                </div>
+                
+                <div class="grid grid-cols-7 gap-3 mb-4">`; // 6 Aisle + 1 ALL
+
+            // Render nút chọn Dãy (A-F)
+            AISLES.forEach(aisle => {
+                const isActive = currentAisle === aisle && searchTerm === '' ? 'bg-blue-600 text-white' : 'bg-gray-200 hover:bg-gray-300';
+                html += `<button onclick="window.selectAisle('${aisle}')" class="py-2 rounded-lg font-medium transition-colors ${isActive}">Dãy ${aisle}</button>`;
+            });
+
+            // Render nút ALL
+            const isAllActive = currentAisle === 'ALL' || searchTerm !== '' ? 'bg-blue-600 text-white' : 'bg-gray-200 hover:bg-gray-300';
+            html += `<button onclick="window.selectAisle('ALL')" class="py-2 rounded-lg font-bold transition-colors ${isAllActive}">Tất Cả (ALL)</button>`;
+
+            html += `</div></div>`;
+            
+            // Check if we are in ALL view or have a search term
+            const isAllView = currentAisle === 'ALL' || searchTerm;
+            
+            const filteredLocations = getFilteredAndSortedLocations(currentAisle, searchTerm);
+
+            if (isAllView) {
+                html += renderAllInventoryView(currentAisle, searchTerm, filteredLocations);
+            } else {
+                html += renderAisleView(currentAisle, filteredLocations);
+            }
+            
+            contentArea.innerHTML = html;
+        };
+
+        // --- RENDER BÁO CÁO TỒN/NHẬP ---
+        const renderReports = () => {
+            // 1. Xử lý dữ liệu: Lọc các vị trí có hàng, tính toán và sắp xếp
+            const reportItems = Object.entries(inventoryData)
+                .filter(([id, data]) => data && data.materialName && data.currentQuantity > 0)
+                .map(([locationId, data]) => {
+                    const totalWeight = (data.currentQuantity || 0) * (data.unitWeight || 0);
+                    return {
+                        ...data,
+                        locationId,
+                        totalWeight
+                    };
+                })
+                .sort((a, b) => {
+                    // Sắp xếp theo Tên nguyên liệu, sau đó là Ngày nhập (FIFO)
+                    if (a.materialName < b.materialName) return -1;
+                    if (a.materialName > b.materialName) return 1;
+                    const dateA = new Date(a.fifoDate || 0).getTime();
+                    const dateB = new Date(b.fifoDate || 0).getTime();
+                    return dateA - dateB;
+                });
+
+            // 2. Xây dựng HTML
+            let html = `
+                <div class="p-6 bg-white card">
+                    <div class="flex flex-col md:flex-row justify-between md:items-center mb-4 space-y-3 md:space-y-0">
+                        <h3 class="text-2xl font-bold text-blue-700">BÁO CÁO KIỂM KHO NGUYÊN LIỆU</h3>
+                        <button onclick="window.exportInventoryReport()" class="flex items-center space-x-2 py-2 px-4 bg-green-600 text-white font-medium rounded-lg hover:bg-green-700 transition duration-150">
+                             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L10 11.586l2.293-2.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                <path fill-rule="evenodd" d="M10 2a1 1 0 011 1v7a1 1 0 11-2 0V3a1 1 0 011-1z" clip-rule="evenodd" />
+                            </svg>
+                            <span>Xuất Excel Báo Cáo Tồn</span>
+                        </button>
+                    </div>
+                    
+                    <div class="overflow-x-auto border rounded-lg">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-100">
+                                <tr>
+                                    <th class="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">STT</th>
+                                    <th class="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Tên nguyên liệu</th>
+                                    <th class="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Ngày nhập (FIFO)</th>
+                                    <th class="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Trọng lượng bao (kg)</th>
+                                    <th class="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Vị trí</th>
+                                    <th class="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Số bao</th>
+                                    <th class="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Trọng lượng (kg)</th>
+                                    <th class="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Ghi chú</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">
+            `;
+
+            if (reportItems.length === 0) {
+                html += `<tr><td colspan="8" class="px-4 py-6 text-center text-gray-500 italic">Không có dữ liệu tồn kho.</td></tr>`;
+            } else {
+                reportItems.forEach((item, index) => {
+                    const fifoDate = item.fifoDate ? new Date(item.fifoDate).toLocaleDateString('vi-VN') : 'N/A';
+                    html += `
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-700">${index + 1}</td>
+                            <td class="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${item.materialName}</td>
+                            <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-700">${fifoDate}</td>
+                            <td class="px-4 py-4 whitespace-nowrap text-sm text-right text-gray-700">${item.unitWeight ? item.unitWeight.toFixed(2) : 'N/A'}</td>
+                            <td class="px-4 py-4 whitespace-nowrap text-sm font-semibold text-gray-700">${item.locationId}</td>
+                            <td class="px-4 py-4 whitespace-nowrap text-sm font-bold text-blue-600 text-right">${item.currentQuantity} ${item.unit}</td>
+                            <td class="px-4 py-4 whitespace-nowrap text-sm font-bold text-red-600 text-right">${item.totalWeight.toFixed(2)}</td>
+                            <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 truncate" title="${item.note || ''}">${item.note || ''}</td>
+                        </tr>
+                    `;
+                });
+            }
+
+            html += `
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+            
+            return html;
+        };
+        
+        // --- RENDER KIỂM TRA KHO KỆ (TỔNG QUAN) ---
+        const renderCheckLocation = () => {
+             let html = `<p class="text-gray-600 mb-4">Tổng quan trạng thái sử dụng của kho kệ (6 Dãy x 4 Hàng).</p>
+                <div class="p-6 bg-white card">
+                    <h3 class="text-xl font-semibold mb-4">Sơ đồ vị trí</h3>
+                    <div class="grid grid-cols-6 gap-2 text-center text-sm font-medium">
+                        ${AISLES.map(aisle => `<div class="p-2 bg-gray-200 rounded-t-lg">Dãy ${aisle}</div>`).join('')}
+                    </div>
+                    <div class="grid grid-cols-6 gap-2 mt-0">
+                        ${AISLES.map(aisle => `
+                            <div class="grid grid-rows-4 gap-2">
+                                ${ROWS.map(row => {
+                                    // Đếm số cột có nguyên liệu trong Hàng-Dãy này (24 cột)
+                                    const occupiedCount = COLS.filter(col => inventoryData[getLocationId(row, aisle, col)]?.materialName).length;
+                                    const percentage = (occupiedCount / COLS.length) * 100;
+                                    const color = percentage > 80 ? 'bg-red-500' : (percentage > 30 ? 'bg-yellow-500' : 'bg-green-500');
+                                    
+                                    return `
+                                        <div class="p-2 text-xs text-white rounded-lg shadow ${color}" 
+                                             title="${occupiedCount}/${COLS.length} cột có hàng">
+                                            Hàng ${row} (${Math.round(percentage)}%)
+                                        </div>
+                                    `;
+                                }).join('')}
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+            return html;
+        };
+
+
+        // --- MODAL THẺ KHO VÀ THAO TÁC ---
+        const modal = document.getElementById('location-modal');
+        const modalContent = document.getElementById('location-modal-content');
+
+        window.showLocationModal = async (locationId) => {
+            const data = inventoryData[locationId] || { materialName: null, currentQuantity: 0, totalImported: 0, totalExported: 0, lotNo: null, note: null, unit: 'bao', supplier: null, unitWeight: 0, fifoDate: null }; // Đơn vị mặc định là 'bao' nếu chưa có dữ liệu
+            
+            // Lấy lịch sử
+            let historyHtml = '<p class="text-center text-gray-500">Đang tải lịch sử...</p>';
+            currentModalHistory = []; // Reset lịch sử
+
+            // Hiện modal loading trước
+            modalContent.innerHTML = renderLocationModal(locationId, data, historyHtml);
+            modal.classList.remove('hidden');
+            
+            try {
+                const historyRef = doc(collection(getInventoryCollectionRef(), locationId, 'history'), 'default_history_doc');
+                const docSnap = await getDoc(historyRef);
+                const historySnapshot = docSnap.exists() ? docSnap.data().entries || [] : [];
+                
+                // Lọc bỏ những entry không có đủ dữ liệu (ví dụ: entry.type trống)
+                currentModalHistory = historySnapshot.filter(entry => entry.type); // Lưu lịch sử vào biến toàn cục
+
+                historyHtml = currentModalHistory.length > 0 ? `
+                    <ul class="space-y-3">
+                        ${currentModalHistory.slice(0, 10).reverse().map(entry => `
+                            <li class="p-3 rounded-lg ${entry.type === 'import' ? 'bg-blue-50' : 'bg-red-50'} border-l-4 ${entry.type === 'import' ? 'border-blue-400' : 'border-red-400'}">
+                                <span class="font-semibold">${entry.type === 'import' ? 'NHẬP' : 'XUẤT'}</span>: ${new Date(entry.date).toLocaleDateString('vi-VN')}
+                                <p class="text-sm mt-1">
+                                    ${entry.type === 'import' ? 
+                                        `Số lượng: <strong>${entry.quantity}</strong> ${entry.unit} | Trọng lượng bao (TB): ${entry.bagWeight.toFixed(2)} kg | Tổng Trọng lượng: ${entry.totalWeight.toFixed(2)} kg | Lot: ${entry.lotNo}` : 
+                                        `Số bao: <strong>${entry.numBags}</strong> | Trọng lượng: ${entry.weight} kg | Người kiểm: ${entry.checker}`}
+                                </p>
+                                <p class="text-xs text-gray-500">Ghi chú: ${entry.note || 'Không có'}</p>
+                            </li>
+                        `).join('')}
+                    </ul>
+                ` : '<p class="text-center text-gray-500">Chưa có lịch sử nhập/xuất tại vị trí này.</p>';
+                
+            } catch (error) {
+                console.error("Lỗi tải lịch sử:", error);
+                historyHtml = '<p class="text-red-500">Lỗi khi tải lịch sử giao dịch.</p>';
+            }
+            
+            // Cập nhật modal với lịch sử đã tải
+            modalContent.innerHTML = renderLocationModal(locationId, data, historyHtml);
+        };
+
+        window.closeModal = () => {
+            modal.classList.add('hidden');
+        };
+
+        const renderLocationModal = (locationId, data, historyHtml) => {
+            const isFilled = data.materialName;
+            
+            const fifoDateDisplay = data.fifoDate 
+                ? new Date(data.fifoDate).toLocaleDateString('vi-VN') 
+                : 'N/A';
+            
+            return `
+                <h3 class="text-2xl font-bold text-center text-blue-700 mb-4">THẺ KHO: ${locationId}</h3>
+                
+                <!-- Nút Xuất Excel -->
+                <div class="flex justify-end mb-4">
+                    <button onclick="window.exportToExcel('${locationId}')" class="flex items-center space-x-2 py-2 px-4 bg-green-600 text-white font-medium rounded-lg hover:bg-green-700 transition duration-150">
+                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L10 11.586l2.293-2.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+                            <path fill-rule="evenodd" d="M10 2a1 1 0 011 1v7a1 1 0 11-2 0V3a1 1 0 011-1z" clip-rule="evenodd" />
+                        </svg>
+                        <span>Xuất Excel Thẻ Kho</span>
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- Thông tin tổng quan -->
+                    <div class="p-4 bg-gray-50 card">
+                        <h4 class="text-lg font-semibold border-b pb-2 mb-3">Tồn Kho Hiện Tại</h4>
+                        <p><strong>Tên Nguyên Liệu:</strong> <span class="text-lg font-bold text-green-700">${data.materialName || 'Trống'}</span></p>
+                        <p><strong>Ngày Nhập Kho FIFO:</strong> <span class="text-lg font-bold text-red-500">${fifoDateDisplay}</span></p>
+                        <p><strong>Trọng Lượng 1 Đơn Vị (Tiêu chuẩn):</strong> ${data.unitWeight > 0 ? data.unitWeight.toFixed(2) + ' kg' : 'N/A'}</p>
+                        <p><strong>Nhà Cung Cấp:</strong> ${data.supplier || 'N/A'}</p>
+                        <p><strong>Số Lot Hiện Tại:</strong> ${data.lotNo || 'N/A'}</p>
+                        <p class="mt-2"><strong>Tổng Nhập (Đã):</strong> ${data.totalImported || 0} ${data.unit || ''}</p>
+                        <p><strong>Tổng Xuất (Đã):</strong> ${data.totalExported || 0} ${data.unit || ''}</p>
+                        <p class="mt-3 text-xl font-extrabold text-red-600">
+                            TỒN HIỆN TẠI: ${data.currentQuantity} ${data.unit || ''}
+                        </p>
+                    </div>
+
+                    <!-- Lịch sử giao dịch -->
+                    <div class="p-4 bg-white card max-h-[400px] overflow-y-auto">
+                        <h4 class="text-lg font-semibold border-b pb-2 mb-3">Lịch Sử Nhập/Xuất (10 giao dịch gần nhất)</h4>
+                        ${historyHtml}
+                    </div>
+                </div>
+
+                <!-- Form Nhập/Xuất và Thao tác -->
+                <div class="mt-6">
+                    <h4 class="text-xl font-bold text-gray-800 mb-4">Thao Tác Kho</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        
+                        <!-- Form Nhập Kho -->
+                        <div class="p-4 bg-blue-100 card">
+                            <h5 class="text-lg font-semibold text-blue-800 mb-3">NHẬP KHO</h5>
+                            <form id="import-form" onsubmit="window.handleImport(event, '${locationId}')" class="space-y-3">
+                                ${!isFilled ? `
+                                    <input type="text" name="materialName" placeholder="Tên Nguyên Liệu (*)" required class="w-full p-2 border rounded-lg">
+                                    <input type="number" name="unitWeight" step="0.01" placeholder="Trọng lượng 1 đơn vị (kg) (*)" required class="w-full p-2 border rounded-lg">
+                                    <input type="text" name="supplier" placeholder="Nhà Cung Cấp (*)" required class="w-full p-2 border rounded-lg">
+                                    <input type="text" name="unit" value="bao" placeholder="Đơn vị (Mặc định: bao) (*)" required class="w-full p-2 border rounded-lg">
+                                ` : `
+                                    <p class="text-sm text-blue-700">Nguyên liệu đang nhập: <strong>${data.materialName}</strong></p>
+                                    <p class="text-sm text-blue-700">Đơn vị: <strong>${data.unit}</strong> - Trọng lượng 1 đơn vị: <strong>${data.unitWeight.toFixed(2)} kg</strong></p>
+                                `}
+                                <input type="text" name="lotNo" placeholder="Lot No (*)" required class="w-full p-2 border rounded-lg">
+                                <input type="number" name="quantity" min="1" placeholder="Số lượng nhập (đơn vị/bao) (*)" required class="w-full p-2 border rounded-lg">
+                                <!-- Trường mới: Tổng trọng lượng nhập -->
+                                <input type="number" name="totalWeightInput" step="0.01" placeholder="TỔNG trọng lượng nhập (kg) (*)" required class="w-full p-2 border rounded-lg">
+                                <textarea name="note" placeholder="Ghi chú (Tồn: Số bao/Trọng lượng/Ghi chú)" class="w-full p-2 border rounded-lg"></textarea>
+                                <button type="submit" class="w-full py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition duration-150">Thực hiện Nhập Kho</button>
+                            </form>
+                        </div>
+                        
+                        <!-- Form Xuất Kho -->
+                        <div class="p-4 bg-red-100 card">
+                            <h5 class="text-lg font-semibold text-red-800 mb-3">XUẤT KHO</h5>
+                            <form id="export-form" onsubmit="window.handleExport(event, '${locationId}', '${data.unit || ''}')" class="space-y-3">
+                                <p class="text-sm text-red-700">Nguyên liệu: <strong>${data.materialName || 'Trống'}</strong></p>
+                                <input type="number" name="numBags" min="1" placeholder="Số bao/thùng xuất (*)" required class="w-full p-2 border rounded-lg">
+                                <input type="number" name="weight" step="0.01" min="1" placeholder="Tổng trọng lượng xuất (kg) (*)" required class="w-full p-2 border rounded-lg">
+                                <p class="text-sm font-medium text-gray-700">Người kiểm: <strong>${loggedInUser}</strong></p>
+                                <textarea name="note" placeholder="Ghi chú xuất (Tồn: Số bao/Trọng lượng/Ghi chú)" class="w-full p-2 border rounded-lg"></textarea>
+                                <button type="submit" class="w-full py-2 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700 transition duration-150" ${!isFilled ? 'disabled title="Vị trí trống, không thể xuất kho"' : ''}>Thực hiện Xuất Kho</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="mt-6 text-right">
+                    <button onclick="window.closeModal()" class="py-2 px-6 bg-gray-200 text-gray-800 font-medium rounded-lg hover:bg-gray-300 transition duration-150">Đóng</button>
+                </div>
+            `;
+        };
+        
+        // --- LOGIC XỬ LÝ NHẬP/XUẤT KHO ---
+        
+        // Cập nhật hoặc Khởi tạo Thẻ kho
+        window.handleImport = async (event, locationId) => {
+            event.preventDefault();
+            const form = event.target;
+            
+            const isNewMaterial = !inventoryData[locationId]?.materialName;
+            
+            const materialName = isNewMaterial ? form.materialName.value.trim() : inventoryData[locationId].materialName;
+            const unitWeight = isNewMaterial ? parseFloat(form.unitWeight.value) : inventoryData[locationId].unitWeight;
+            const supplier = isNewMaterial ? form.supplier.value.trim() : inventoryData[locationId].supplier;
+            const unit = isNewMaterial ? form.unit.value.trim() : inventoryData[locationId].unit; 
+            
+            const lotNo = form.lotNo.value.trim();
+            const quantity = parseFloat(form.quantity.value); // Số lượng nhập (đơn vị/bao)
+            const totalWeightInput = parseFloat(form.totalWeightInput.value); // Tổng trọng lượng nhập
+            const note = form.note.value.trim();
+            
+            const currentData = inventoryData[locationId] || { currentQuantity: 0, totalImported: 0, totalExported: 0, fifoDate: null }; // Thêm fifoDate
+            
+            if (isNaN(quantity) || quantity <= 0 || isNaN(totalWeightInput) || totalWeightInput <= 0) {
+                 showSimpleModal('Lỗi Nhập Liệu', 'Số lượng nhập và Tổng trọng lượng nhập phải lớn hơn 0.');
+                 return;
+            }
+
+            const bagWeight = totalWeightInput / quantity; // Tính trọng lượng bao trung bình
+            const totalWeight = totalWeightInput; // Tổng trọng lượng
+
+            const newTotalImported = (currentData.totalImported || 0) + quantity;
+            const newCurrentQuantity = (currentData.currentQuantity || 0) + quantity;
+
+            const materialRef = doc(getInventoryCollectionRef(), locationId);
+
+            // LOGIC NEW: Đặt fifoDate
+            let newFifoDate = currentData.fifoDate;
+            const locationWasEmpty = (currentData.currentQuantity || 0) === 0;
+
+            if (isNewMaterial || locationWasEmpty) {
+                 // Nếu là vật liệu mới (chưa từng có tên) hoặc vị trí vừa hết hàng, đặt ngày FIFO mới
+                 newFifoDate = new Date().toISOString(); 
+            } else if (currentData.materialName && currentData.materialName !== materialName) {
+                 // Nếu đang có hàng nhưng nhập vật liệu khác (Cảnh báo người dùng nên xuất hết trước)
+                 newFifoDate = new Date().toISOString();
+                 console.warn("Vị trí này đang chứa nguyên liệu khác. FIFO date đã được reset.");
+            } else {
+                newFifoDate = currentData.fifoDate; // Giữ nguyên ngày FIFO cũ (FIFO cho hàng cũ)
+            }
+
+
+            try {
+                // 1. Cập nhật (hoặc tạo mới) thông tin thẻ kho
+                const updateData = {
+                    materialName: materialName,
+                    unitWeight: unitWeight,
+                    supplier: supplier,
+                    unit: unit,
+                    lotNo: lotNo, 
+                    totalImported: newTotalImported,
+                    currentQuantity: newCurrentQuantity,
+                    updatedAt: serverTimestamp(),
+                    note: note,
+                    fifoDate: newFifoDate // Lưu ngày FIFO
+                };
+                
+                if (isNewMaterial) {
+                    await setDoc(materialRef, updateData);
+                } else {
+                    await updateDoc(materialRef, updateData);
+                }
+
+                // 2. Ghi vào lịch sử
+                const historyRef = doc(collection(getInventoryCollectionRef(), locationId, 'history'), 'default_history_doc');
+                const historyEntry = {
+                    type: 'import',
+                    date: new Date().toISOString(),
+                    lotNo: lotNo,
+                    unit: unit, 
+                    quantity: quantity,
+                    bagWeight: bagWeight, // Trọng lượng bao (trung bình) đã tính toán
+                    totalWeight: totalWeight, // Trọng lượng tổng đã nhập
+                    location: locationId,
+                    checker: loggedInUser,
+                    note: note
+                };
+                
+                await updateDoc(historyRef, {
+                    entries: arrayUnion(historyEntry)
+                }).catch(async (e) => {
+                    if (e.code === 'not-found' || e.message.includes('No document to update')) {
+                         await setDoc(historyRef, { entries: [historyEntry] });
+                    } else {
+                         throw e;
+                    }
+                });
+
+                showSimpleModal('Nhập Kho Thành Công', `Đã nhập ${quantity} ${unit} ${materialName} (Tổng ${totalWeight.toFixed(2)} kg) vào vị trí ${locationId}.`);
+                window.closeModal();
+            } catch (error) {
+                console.error("Lỗi khi nhập kho:", error);
+                showSimpleModal('Lỗi', `Không thể thực hiện nhập kho: ${error.message}`);
+            }
+        };
+
+        // --- HÀM XUẤT EXCEL TỔNG HỢP (MỚI) ---
+        window.exportInventoryReport = () => {
+            // 1. Lấy và xử lý dữ liệu (giống hệt renderReports)
+            const reportItems = Object.entries(inventoryData)
+                .filter(([id, data]) => data && data.materialName && data.currentQuantity > 0)
+                .map(([locationId, data]) => {
+                    const totalWeight = (data.currentQuantity || 0) * (data.unitWeight || 0);
+                    return { ...data, locationId, totalWeight };
+                })
+                .sort((a, b) => {
+                    if (a.materialName < b.materialName) return -1;
+                    if (a.materialName > b.materialName) return 1;
+                    const dateA = new Date(a.fifoDate || 0).getTime();
+                    const dateB = new Date(b.fifoDate || 0).getTime();
+                    return dateA - dateB;
+                });
+
+            if (reportItems.length === 0) {
+                showSimpleModal('Lỗi', 'Không có dữ liệu tồn kho để xuất báo cáo.');
+                return;
+            }
+
+            // 2. Dữ liệu cố định (Tiêu đề) - Theo mẫu image
+            const excelHeader = [
+                ['CÔNG TY CỔ PHẦN CHĂN NUÔI C.P. VIỆT NAM - CHI NHÁNH NM2 TẠI BÌNH PHƯỚC'], // A1
+                ['C.P. VIET NAM CORPORATION - BINH PHUOC Factory 2'], // A2
+                ['Phòng Kho Nguyên Liệu'], // A3
+                ['Raw Material Warehouse Department'], // A4
+                [''], // A5
+                ['BÁO CÁO KIỂM KHO NGUYÊN LIỆU, CHẤT PHỤ GIA, PREMIX'], // A6
+                ['RAW MATERIAL, ADDITIVES, AND PREMIX INVENTORY REPORT'], // A7
+                [''], // A8 (Dòng trống)
+                // Tiêu đề bảng
+                ['STT', 'Tên nguyên liệu', 'Ngày nhập', 'Trọng lượng bao', 'Vị trí', 'Số bao', 'Trọng lượng (kg)', 'Ghi chú'],
+                ['Item', 'Raw Material Name', 'Import Date', 'Bag Weight', 'Location', 'Number of Bags', 'Weight (kg)', 'Notes']
+            ];
+
+            // 3. Dữ liệu các dòng
+            const transactionRows = reportItems.map((item, index) => [
+                index + 1, // STT
+                item.materialName, // Tên nguyên liệu
+                item.fifoDate ? new Date(item.fifoDate).toLocaleDateString('vi-VN') : '', // Ngày nhập
+                item.unitWeight ? item.unitWeight.toFixed(2) : '', // Trọng lượng bao
+                item.locationId, // Vị trí
+                item.currentQuantity, // Số bao
+                item.totalWeight.toFixed(2), // Trọng lượng (kg)
+                item.note || '' // Ghi chú
+            ]);
+            
+            const finalData = excelHeader.concat(transactionRows);
+
+            // 4. Tạo Worksheet
+            const ws = XLSX.utils.aoa_to_sheet(finalData);
+
+            // 5. Merge Cells
+            const merges = [
+                { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } }, // A1:H1
+                { s: { r: 1, c: 0 }, e: { r: 1, c: 7 } }, // A2:H2
+                { s: { r: 2, c: 0 }, e: { r: 2, c: 7 } }, // A3:H3
+                { s: { r: 3, c: 0 }, e: { r: 3, c: 7 } }, // A4:H4
+                { s: { r: 5, c: 0 }, e: { r: 5, c: 7 } }, // A6:H6
+                { s: { r: 6, c: 0 }, e: { r: 6, c: 7 } }, // A7:H7
+            ];
+            ws['!merges'] = merges;
+
+            // 6. Chiều rộng cột
+            const wscols = [
+                { wch: 5 },  // STT
+                { wch: 25 }, // Tên nguyên liệu
+                { wch: 15 }, // Ngày nhập
+                { wch: 15 }, // Trọng lượng bao
+                { wch: 15 }, // Vị trí
+                { wch: 12 }, // Số bao
+                { wch: 15 }, // Trọng lượng (kg)
+                { wch: 25 }  // Ghi chú
+            ];
+            ws['!cols'] = wscols;
+
+            // 7. Styling (Đơn giản hơn thẻ kho, chủ yếu là header)
+            const BORDER_ALL = {
+                top: { style: "thin" }, bottom: { style: "thin" },
+                left: { style: "thin" }, right: { style: "thin" }
+            };
+            const CENTER_WRAP = { alignment: { horizontal: 'center', vertical: 'center', wrapText: true } };
+            const LEFT_WRAP = { alignment: { horizontal: 'left', vertical: 'center', wrapText: true } };
+            
+            const getCellRef = (r, c) => XLSX.utils.encode_cell({ r: r, c: c });
+
+            const applyStyle = (range, style) => {
+                for(let R = range.s.r; R <= range.e.r; ++R) {
+                    for(let C = range.s.c; C <= range.e.c; ++C) {
+                        const cellref = getCellRef(R, C);
+                        if(!ws[cellref]) ws[cellref] = {};
+                        ws[cellref].s = { ...ws[cellref].s, ...style };
+                    }
+                }
+            };
+
+            // Style Tiêu đề Công ty (A1:A7)
+            for(let R = 0; R <= 6; R++) {
+                if(R === 4) continue; // Bỏ qua dòng trống A5
+                const ref = getCellRef(R, 0);
+                if(!ws[ref]) ws[ref] = {};
+                ws[ref].s = { 
+                    font: { bold: true, size: 12, name: 'Times New Roman' }, 
+                    alignment: { horizontal: 'center', vertical: 'center' }
+                };
+            }
+            // Tiêu đề báo cáo (A6, A7) màu xanh
+            applyStyle({ s: { r: 5, c: 0 }, e: { r: 6, c: 0 } }, { font: { color: { rgb: "FF0000FF" } } }); // Blue
+
+            // Style Tiêu đề Bảng (Hàng 9-10)
+            const headerRange = { s: { r: 8, c: 0 }, e: { r: 9, c: 7 } };
+            applyStyle(headerRange, { 
+                border: BORDER_ALL, 
+                font: { bold: true, name: 'Times New Roman' },
+                fill: { fgColor: { rgb: "FFD9D9D9" } }, // Xám nhạt
+                alignment: { horizontal: 'center', vertical: 'center', wrapText: true }
+            });
+
+            // Style Dữ liệu Giao dịch
+            const dataStartRow = 10;
+            const dataEndRow = dataStartRow + transactionRows.length - 1;
+            if (transactionRows.length > 0) {
+                const dataRange = { s: { r: dataStartRow, c: 0 }, e: { r: dataEndRow, c: 7 } };
+                applyStyle(dataRange, { border: BORDER_ALL, font: { name: 'Times New Roman' } });
+                
+                // Căn trái
+                applyStyle({ s: { r: dataStartRow, c: 1 }, e: { r: dataEndRow, c: 1 } }, LEFT_WRAP); // Tên
+                applyStyle({ s: { r: dataStartRow, c: 7 }, e: { r: dataEndRow, c: 7 } }, LEFT_WRAP); // Ghi chú
+                
+                // Căn giữa cho STT, Ngày nhập, Vị trí
+                applyStyle({ s: { r: dataStartRow, c: 0 }, e: { r: dataEndRow, c: 0 } }, CENTER_WRAP); // STT
+                applyStyle({ s: { r: dataStartRow, c: 2 }, e: { r: dataEndRow, c: 2 } }, CENTER_WRAP); // Ngày nhập
+                applyStyle({ s: { r: dataStartRow, c: 4 }, e: { r: dataEndRow, c: 4 } }, CENTER_WRAP); // Vị trí
+
+                // Căn phải cho số
+                const numberStyle = { alignment: { horizontal: 'right', vertical: 'center' }, numFmt: '0.00' };
+                applyStyle({ s: { r: dataStartRow, c: 3 }, e: { r: dataEndRow, c: 3 } }, numberStyle); // Trọng lượng bao
+                applyStyle({ s: { r: dataStartRow, c: 5 }, e: { r: dataEndRow, c: 5 } }, { ...numberStyle, numFmt: '0' }); // Số bao
+                applyStyle({ s: { r: dataStartRow, c: 6 }, e: { r: dataEndRow, c: 6 } }, numberStyle); // Trọng lượng (kg)
+            }
+
+            // 8. Xuất file
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Bao Cao Ton Kho");
+            XLSX.writeFile(wb, `Bao_Cao_Ton_Kho_Tong_Hop_${new Date().toISOString().split('T')[0]}.xlsx`);
+            showSimpleModal('Xuất File Thành Công', `Đã xuất Báo Cáo Tồn Kho Tổng Hợp.`);
+        };
+
+
+        // --- HÀM XUẤT EXCEL (CẬP NHẬT STYLE VÀ FORMAT) ---
+        window.exportToExcel = (locationId) => {
+            const data = inventoryData[locationId];
+            if (!data) {
+                showSimpleModal('Lỗi', 'Không tìm thấy dữ liệu tồn kho cho vị trí này.');
+                return;
+            }
+            if (currentModalHistory.length === 0) {
+                 showSimpleModal('Lỗi', 'Không có lịch sử nhập/xuất để xuất báo cáo.');
+                 return;
+            }
+
+            // Dữ liệu chung
+            const materialName = data.materialName || 'N/A';
+            const unit = data.unit || 'N/A';
+            const unitWeight = data.unitWeight || 0;
+            const lotNo = data.lotNo || 'N/A';
+            const storageLocation = locationId;
+
+            // Xử lý dữ liệu lịch sử để tính tồn kho lũy kế (Tồn cuối cùng là currentData)
+            const sortedHistory = [...currentModalHistory].sort((a, b) => new Date(a.date) - new Date(b.date));
+            
+            let currentBags = 0; // Số bao tồn lũy kế
+            let currentWeight = 0; // Trọng lượng tồn lũy kế
+            
+            const exportData = [];
+            
+            // Xử lý từng giao dịch
+            sortedHistory.forEach(entry => {
+                let quantityExported = 0; // Số lượng đơn vị xuất (tính toán)
+                
+                const row = {
+                    'Ngày nhập': entry.type === 'import' ? new Date(entry.date).toLocaleDateString('vi-VN') : '',
+                    'Vị trí lưu kho': storageLocation,
+                    'Lot No': entry.type === 'import' ? entry.lotNo : '',
+                    
+                    // NHẬP / RECEIVE
+                    'Số bao (Nhập)': entry.type === 'import' ? entry.quantity : '',
+                    'Trọng lượng bao (kg)': entry.type === 'import' ? entry.bagWeight.toFixed(2) : '', // Lấy trọng lượng trung bình
+                    'Trọng lượng tổng (kg)': entry.type === 'import' ? entry.totalWeight.toFixed(2) : '', // Lấy từ dữ liệu lịch sử
+                    
+                    // XUẤT / EXPORT
+                    'Ngày xuất': entry.type === 'export' ? new Date(entry.date).toLocaleDateString('vi-VN') : '',
+                    'Số bao (Xuất)': entry.type === 'export' ? entry.numBags : '',
+                    'Trọng lượng bao (Xuất)': entry.type === 'export' ? (entry.weight / entry.numBags).toFixed(2) : '', // Trọng lượng trung bình
+                    'Người kiểm': entry.type === 'export' ? entry.checker : '',
+
+                    // TỒN / INVENTORY (Tính toán lũy kế)
+                    'Số bao (Tồn)': 0,
+                    'Trọng lượng (kg) (Tồn)': 0,
+                    
+                    // Ghi chú
+                    'GHI CHÚ': entry.note || '',
+                };
+
+                if (entry.type === 'import') {
+                    const bags = entry.quantity;
+                    const weight = entry.totalWeight; // Dùng trọng lượng tổng đã lưu
+                    currentBags += bags;
+                    currentWeight += weight;
+                } else if (entry.type === 'export') {
+                    const bags = entry.numBags;
+                    const weight = entry.weight;
+                    currentBags -= bags;
+                    currentWeight -= weight;
+                }
+                
+                // Cập nhật giá trị tồn lũy kế sau giao dịch
+                row['Số bao (Tồn)'] = Math.round(currentBags);
+                row['Trọng lượng (kg) (Tồn)'] = Math.round(currentWeight);
+
+                exportData.push(row);
+            });
+            
+            // --- BƯỚC 1: Xây dựng cấu trúc dữ liệu cho Excel (giống hệt hình ảnh) ---
+            
+            // 1. Dữ liệu cố định (Tiêu đề)
+            const excelHeader = [
+                ['CÔNG TY CỔ PHẦN CHĂN NUÔI C.P. VIỆT NAM - CHI NHÁNH NM2 TẠI BÌNH PHƯỚC'], // A1
+                ['C.P. VIET NAM CORPORATION - BINH PHUOC Factory 2'], // A2
+                ['Phòng Kho Nguyên Liệu'], // A3
+                ['Raw Material Warehouse Department'], // A4
+                [''], // A5 (Dòng trống)
+                ['Tên nguyên liệu/Raw Material Name:', materialName, ''], // A6, B6
+                [''], // A7 (Dòng trống)
+
+                // Hàng 8 - Tiêu đề 1 (Merge)
+                ['Ngày nhập', 'Vị trí lưu kho', 'Lot No', 'NHẬP / RECEIVE', '', '', 'XUẤT / EXPORT', '', '', '', 'TỒN / INVENTORY', '', 'GHI CHÚ / NOTES'], 
+                
+                // Hàng 9 - Tiêu đề 2
+                ['Import Date', 'Storage Location', 'Lot No', 'Số bao', 'Trọng lượng bao', 'Trọng lượng tổng', 'Ngày xuất', 'Số bao', 'Trọng lượng bao', 'Người kiểm', 'Số bao', 'Trọng lượng (kg)', 'NOTES'], 
+                
+                // Hàng 10 - Tiêu đề 3
+                ['', '', '', 'Number of Bags', 'Bag Weight (kg)', 'Weight Total (kg)', 'Export Date', 'Number of Bags', 'Bag Weight (kg)', 'Inspector', 'Number of Bags', 'Weight (kg)', ''],
+            ];
+
+            // Dữ liệu các dòng giao dịch
+            const transactionRows = exportData.map(row => [
+                row['Ngày nhập'],
+                row['Vị trí lưu kho'],
+                row['Lot No'],
+                row['Số bao (Nhập)'],
+                row['Trọng lượng bao (kg)'],
+                row['Trọng lượng tổng (kg)'],
+                row['Ngày xuất'],
+                row['Số bao (Xuất)'],
+                row['Trọng lượng bao (Xuất)'],
+                row['Người kiểm'],
+                row['Số bao (Tồn)'],
+                row['Trọng lượng (kg) (Tồn)'],
+                row['GHI CHÚ']
+            ]);
+
+            const finalData = excelHeader.concat(transactionRows);
+
+            // --- BƯỚC 2: Tạo Workbook và Worksheet ---
+            const ws = XLSX.utils.aoa_to_sheet(finalData);
+            
+            // --- BƯỚC 3: Merge Cells (Giữ nguyên như cũ) ---
+            ws['!merges'] = [
+                { s: { r: 0, c: 0 }, e: { r: 0, c: 12 } }, // A1:M1 - Công ty
+                { s: { r: 1, c: 0 }, e: { r: 1, c: 12 } }, // A2:M2 - CP
+                { s: { r: 2, c: 0 }, e: { r: 2, c: 12 } }, // A3:M3 - Phòng Kho
+                { s: { r: 3, c: 0 }, e: { r: 3, c: 12 } }, // A4:M4 - Raw Material
+                
+                { s: { r: 7, c: 3 }, e: { r: 7, c: 5 } },  // D8:F8 - NHẬP / RECEIVE
+                { s: { r: 7, c: 6 }, e: { r: 7, c: 9 } },  // G8:J8 - XUẤT / EXPORT
+                { s: { r: 7, c: 10 }, e: { r: 7, c: 11 } },// K8:L8 - TỒN / INVENTORY
+                { s: { r: 7, c: 12 }, e: { r: 9, c: 12 } },// M8:M10 - GHI CHÚ
+                
+                { s: { r: 7, c: 0 }, e: { r: 9, c: 0 } },  // A8:A10 - Ngày nhập
+                { s: { r: 7, c: 1 }, e: { r: 9, c: 1 } },  // B8:B10 - Vị trí lưu kho
+                { s: { r: 7, c: 2 }, e: { r: 9, c: 2 } },  // C8:C10 - Lot No
+                
+                // Merge cho các ô tiêu đề con 2 dòng (Hàng 8-9)
+                { s: { r: 8, c: 3 }, e: { r: 9, c: 3 } }, // D9:D10 - Số bao nhập
+                { s: { r: 8, c: 4 }, e: { r: 9, c: 4 } }, // E9:E10 - Trọng lượng bao (kg)
+                { s: { r: 8, c: 5 }, e: { r: 9, c: 5 } }, // F9:F10 - Trọng lượng tổng (kg)
+
+                { s: { r: 7, c: 6 }, e: { r: 9, c: 6 } }, // G8:G10 - Ngày xuất (Đã merge ở trên)
+                
+                { s: { r: 8, c: 7 }, e: { r: 9, c: 7 } }, // H9:H10 - Số bao xuất
+                { s: { r: 8, c: 8 }, e: { r: 9, c: 8 } }, // I9:I10 - Trọng lượng bao (Xuất)
+                { s: { r: 8, c: 9 }, e: { r: 9, c: 9 } }, // J9:J10 - Người kiểm
+                
+                { s: { r: 8, c: 10 }, e: { r: 9, c: 10 } }, // K9:K10 - Số bao tồn
+                { s: { r: 8, c: 11 }, e: { r: 9, c: 11 } }, // L9:L10 - Trọng lượng (Tồn)
+                
+                // Merge cho Tên Nguyên Liệu: B6:M6
+                { s: { r: 5, c: 1 }, e: { r: 5, c: 12 } },
+            ];
+            
+            // Cập nhật lại Tên Nguyên Liệu sau khi merge (A6, B6)
+            XLSX.utils.sheet_add_aoa(ws, [
+                ['Tên nguyên liệu/Raw Material Name:', materialName]
+            ], { origin: 'A6' });
+            
+
+            // --- BƯỚC 4: Thiết lập chiều rộng cột ---
+            const wscols = [
+                { wch: 15 }, { wch: 15 }, { wch: 12 }, 
+                { wch: 12 }, { wch: 15 }, { wch: 15 }, 
+                { wch: 15 }, { wch: 12 }, { wch: 15 }, 
+                { wch: 12 }, { wch: 12 }, { wch: 15 }, 
+                { wch: 25 }
+            ];
+            ws['!cols'] = wscols;
+
+            // --- BƯỚC 5: Định dạng màu sắc và border (THEO HÌNH ẢNH) ---
+
+            // Màu sắc
+            const BLUE_BG = "FFDDEBF7"; // Xanh nhạt cho NHẬP (D8:F10)
+            const YELLOW_BG = "FFFFE599"; // Vàng nhạt cho XUẤT (G8:J10)
+            const GREEN_BG = "FFC6E0B4"; // Xanh lá nhạt cho TỒN (K8:L10)
+            const HEADER_BG = "FFD9D9D9"; // Xám nhạt cho tiêu đề 1 (A8:M8)
+            const CENTER_WRAP = { alignment: { horizontal: 'center', vertical: 'center', wrapText: true } };
+            const LEFT_WRAP = { alignment: { horizontal: 'left', vertical: 'center', wrapText: true } };
+            const BORDER_ALL = {
+                top: { style: "thin" }, bottom: { style: "thin" },
+                left: { style: "thin" }, right: { style: "thin" }
+            };
+            const BORDER_HEAVY = {
+                top: { style: "medium" }, bottom: { style: "medium" },
+                left: { style: "medium" }, right: { style: "medium" }
+            };
+            
+            // Hàm lấy tên ô theo tọa độ (ví dụ: 0, 0 -> A1)
+            const getCellRef = (r, c) => XLSX.utils.encode_cell({ r: r, c: c });
+            
+            // Áp dụng style cho từng vùng ô
+            const applyStyle = (range, style) => {
+                for(let R = range.s.r; R <= range.e.r; ++R) {
+                    for(let C = range.s.c; C <= range.e.c; ++C) {
+                        const cellref = getCellRef(R, C);
+                        if(!ws[cellref]) ws[cellref] = {};
+                        ws[cellref].s = { ...ws[cellref].s, ...style };
+                    }
+                }
+            };
+            
+            // --- 5.1 Style Tiêu đề Công ty (A1:A4) ---
+            for(let R = 0; R <= 3; R++) {
+                const ref = getCellRef(R, 0);
+                if(!ws[ref]) ws[ref] = {};
+                ws[ref].s = { 
+                    font: { bold: true, size: 12, name: 'Times New Roman' }, 
+                    alignment: { horizontal: 'center', vertical: 'center' }
+                };
+            }
+            
+            // --- 5.2 Style Thông tin Nguyên Liệu (A6:M6) ---
+            applyStyle({ s: { r: 5, c: 0 }, e: { r: 5, c: 0 } }, { font: { bold: true, name: 'Times New Roman' }, alignment: { horizontal: 'left', vertical: 'center' }}); // A6: Tiêu đề cố định
+            applyStyle({ s: { r: 5, c: 1 }, e: { r: 5, c: 12 } }, { font: { bold: true, size: 11, name: 'Times New Roman', color: { rgb: "FF0000FF" } }, alignment: { horizontal: 'left', vertical: 'center' }}); // B6: Dữ liệu Nguyên Liệu (Màu xanh đậm)
+            
+            // --- 5.3 Style Tiêu đề Bảng (Hàng 8-10) ---
+            const headerRange = { s: { r: 7, c: 0 }, e: { r: 9, c: 12 } };
+            
+            // Border dày cho toàn bộ khu vực tiêu đề (A8:M10)
+            applyStyle(headerRange, { border: BORDER_HEAVY, font: { bold: true, name: 'Times New Roman' } });
+            
+            // Nền Xám cho Tiêu đề 1 (A8:M8)
+            applyStyle({ s: { r: 7, c: 0 }, e: { r: 7, c: 12 } }, { fill: { fgColor: { rgb: HEADER_BG } } });
+
+            // Nền Xanh, Vàng, Xanh lá cho khu vực Tiêu đề 2 & 3 (Hàng 9-10)
+            applyStyle({ s: { r: 8, c: 3 }, e: { r: 9, c: 5 } }, { fill: { fgColor: { rgb: BLUE_BG } } });   // NHẬP
+            applyStyle({ s: { r: 8, c: 6 }, e: { r: 9, c: 9 } }, { fill: { fgColor: { rgb: YELLOW_BG } } }); // XUẤT
+            applyStyle({ s: { r: 8, c: 10 }, e: { r: 9, c: 11 } }, { fill: { fgColor: { rgb: GREEN_BG } } });// TỒN
+            
+            // Căn giữa cho toàn bộ tiêu đề
+            applyStyle(headerRange, CENTER_WRAP);
+
+            // --- 5.4 Style Dữ liệu Giao dịch (Từ Hàng 11 trở đi) ---
+            const dataStartRow = 10;
+            const dataEndRow = dataStartRow + transactionRows.length - 1;
+            const dataRange = { s: { r: dataStartRow, c: 0 }, e: { r: dataEndRow, c: 12 } };
+
+            if (transactionRows.length > 0) {
+                 // Font và Border mỏng cho toàn bộ dữ liệu
+                applyStyle(dataRange, { border: BORDER_ALL, font: { name: 'Times New Roman' } });
+                
+                // Căn giữa cho các cột A, B, C (Ngày, Vị trí, Lot)
+                applyStyle({ s: { r: dataStartRow, c: 0 }, e: { r: dataEndRow, c: 2 } }, CENTER_WRAP);
+                
+                // Căn giữa cho các cột G, J (Ngày xuất, Người kiểm)
+                applyStyle({ s: { r: dataStartRow, c: 6 }, e: { r: dataEndRow, c: 6 } }, CENTER_WRAP);
+                applyStyle({ s: { r: dataStartRow, c: 9 }, e: { r: dataEndRow, c: 9 } }, CENTER_WRAP);
+                
+                // Căn phải cho các cột Số/Trọng lượng (D-F, H-I, K-L)
+                const numberStyle = { alignment: { horizontal: 'right', vertical: 'center' }, numFmt: '0.00' };
+                applyStyle({ s: { r: dataStartRow, c: 3 }, e: { r: dataEndRow, c: 5 } }, numberStyle);
+                applyStyle({ s: { r: dataStartRow, c: 7 }, e: { r: dataEndRow, c: 8 } }, numberStyle);
+                applyStyle({ s: { r: dataStartRow, c: 10 }, e: { r: dataEndRow, c: 11 } }, numberStyle);
+                
+                // Cột Ghi chú (M) - Căn trái
+                applyStyle({ s: { r: dataStartRow, c: 12 }, e: { r: dataEndRow, c: 12 } }, LEFT_WRAP);
+            }
+            
+            // --- CẬP NHẬT TÊN CỘT ĐÚNG CHO TIÊU ĐỀ 2 & 3 ---
+            XLSX.utils.sheet_add_aoa(ws, [
+                ['Import Date', 'Storage Location', 'Lot No', 'Số bao', 'Trọng lượng bao', 'Trọng lượng tổng', 'Ngày xuất', 'Số bao', 'Trọng lượng bao', 'Người kiểm', 'Số bao', 'Trọng lượng (kg)', 'NOTES'], 
+                ['', '', '', 'Number of Bags', 'Bag Weight (kg)', 'Weight Total (kg)', 'Export Date', 'Number of Bags', 'Bag Weight (kg)', 'Inspector', 'Number of Bags', 'Weight (kg)', ''],
+            ], { origin: 'A9' });
+
+
+            // --- BƯỚC 6: Tạo Workbook và Xuất file ---
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Thẻ Kho");
+            
+            // Xuất file
+            XLSX.writeFile(wb, `The_Kho_${locationId}_${materialName.replace(/ /g, '_')}.xlsx`);
+            showSimpleModal('Xuất File Thành Công', `Đã xuất dữ liệu thẻ kho ${locationId} ra file Excel với định dạng màu sắc đầy đủ.`);
+        };
+
+
+        // --- HÀM MODAL ĐƠN GIẢN (THAY THẾ ALERT) ---
+
+        const simpleModal = document.getElementById('simple-modal');
+        const simpleModalTitle = document.getElementById('simple-modal-title');
+        const simpleModalBody = document.getElementById('simple-modal-body');
+
+        function showSimpleModal(title, message) {
+            simpleModalTitle.innerText = title;
+            simpleModalBody.innerText = message;
+            simpleModal.classList.remove('hidden');
+        }
+
+        window.closeSimpleModal = () => {
+            simpleModal.classList.add('hidden');
+        };
+        
+        // Khởi động ứng dụng
+        window.onload = renderApp;
+
+    </script>
+
+    <!-- CONTAINER CHÍNH -->
+    <div id="app-container">
+        <!-- Nội dung sẽ được chèn bởi JavaScript -->
+    </div>
+
+    <!-- Modal Chi Tiết Thẻ Kho (Complex Modal) -->
+    <div id="location-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-75 z-50 flex items-center justify-center p-4 transition-opacity duration-300">
+        <div class="bg-white p-6 card max-w-5xl w-full transform transition-all duration-300 scale-100 overflow-y-auto max-h-[90vh]">
+            <div id="location-modal-content">
+                <!-- Nội dung được chèn bởi window.showLocationModal -->
+            </div>
+        </div>
+    </div>
+    
+    <!-- Modal Thông Báo Đơn Giản (Simple Modal) -->
+    <div id="simple-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-75 z-50 flex items-center justify-center transition-opacity duration-300">
+        <div class="bg-white p-6 card max-w-sm w-full transform transition-all duration-300 scale-100">
+            <h3 id="simple-modal-title" class="text-xl font-bold text-gray-800 mb-4">Thông Báo</h3>
+            <p id="simple-modal-body" class="text-gray-600 mb-6"></p>
+            <div class="flex justify-end">
+                <button onclick="window.closeSimpleModal()" class="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition duration-150">OK</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
