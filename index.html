@@ -100,7 +100,7 @@ let firestoreUserid = null; // Biến này cũng phải được khai báo
                     console.error("Lỗi xác thực Firebase:", error);
                 }
             }
-            firestoreUserId = auth.currentUser?.uid;
+            firestoreUserId = auth.currentUser ? auth.currentUser.uid : null;
            // renderApp(); // Hiển thị giao diện lần đầu (mặc định là login)
             if (firestoreUserId) {
                 setupRealtimeListener();
