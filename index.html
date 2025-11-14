@@ -101,7 +101,7 @@ let firestoreUserid = null; // Biến này cũng phải được khai báo
                 }
             }
             firestoreUserId = auth.currentUser?.uid;
-            renderApp(); // Hiển thị giao diện lần đầu (mặc định là login)
+           // renderApp(); // Hiển thị giao diện lần đầu (mặc định là login)
             if (firestoreUserId) {
                 setupRealtimeListener();
             }
@@ -216,7 +216,7 @@ let firestoreUserid = null; // Biến này cũng phải được khai báo
                     <form id="login-form" class="space-y-4">
                         <div>
                             <label for="login-username" class="sr-only">Tên đăng nhập</label>
-                            <input id="login-username" name="username" type="text" value="user1" required class="relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-lg focus:outline-none focus:ring-blue-500 focus:border-blue-500" placeholder="Tên đăng nhập">
+                            <input id="login-username" name="username" type="text" value="anhle" required class="relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-lg focus:outline-none focus:ring-blue-500 focus:border-blue-500" placeholder="Tên đăng nhập">
                         </div>
                         <div>
                             <label for="login-password" class="sr-only">Mật khẩu</label>
